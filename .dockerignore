@@ -1,0 +1,13 @@
+.git
+.venv
+venv
+__pycache__
+**/__pycache__
+.pytest_cache
+*.pyc
+models
+*.gguf
+*.kcpps
+*.kcppt
+tests
+README.md

@@ -1,0 +1,77 @@
+# kobold-router in front of one KoboldCPP.
+#
+#   docker compose up --build
+#
+# Put .gguf / .kcpps / .kcppt files in ./models. The kobold service starts
+# from ./models/gemma-rp.kcpps (change KCPP_ARGS if your file has another name).
+# Change the password before exposing the port. It is sent to KoboldCPP as
+# KCPP_ADMINPASSWORD and to the router as KOBOLD_ADMIN_PASSWORD.
+#
+# Use a KoboldCPP that is already running on the host:
+#   1. Comment out the whole `kobold` service and `depends_on` below.
+#   2. Set KOBOLD_BACKEND=http://host.docker.internal:5001
+#   3. Uncomment `extra_hosts` on kobold-router (needed on Linux).
+#   4. Start that KoboldCPP with --admin --admindir <models> and the same
+#      admin password. --routermode is optional; this proxy does the switch.
+
+services:
+  kobold-router:
+    build: .
+    container_name: kobold-router
+    ports:
+      - "${ROUTER_PORT:-8080}:8080"
+    environment:
+      CONFIG_PATH: /config/config.yaml
+      KOBOLD_BACKEND: ${KOBOLD_BACKEND:-http://kobold:5001}
+      KOBOLD_ADMIN_PASSWORD: ${KOBOLD_ADMIN_PASSWORD:-ChangeMe}
+    volumes:
+      # Point this at ./config.yaml after you copy config.example.yaml.
+      - ./config.example.yaml:/config/config.yaml:ro
+      - ./models:/models:ro
+    # extra_hosts:
+    #   - "host.docker.internal:host-gateway"
+    depends_on:
+      - kobold
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  kobold:
+    image: koboldai/koboldcpp:latest
+    container_name: kobold
+    ports:
+      - "${KOBOLD_PORT:-5001}:5001"
+    environment:
+      # The image opens a public tunnel unless this is set.
+      KCPP_DONT_TUNNEL: "true"
+      KCPP_ADMINPASSWORD: ${KOBOLD_ADMIN_PASSWORD:-ChangeMe}
+      # --routermode only swaps on OpenAI requests. Native /api/v1/generate
+      # (SillyTavern) does not, which is why kobold-router calls the admin
+      # API itself. You can remove --routermode and keep --admin --admindir.
+      KCPP_ARGS: "--host 0.0.0.0 --port 5001 --admin --admindir /models --routermode --config /models/gemma-rp.kcpps"
+    volumes:
+      - ./models:/models
+    # NVIDIA GPU. Needs the NVIDIA Container Toolkit. Uncomment to enable.
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+    restart: unless-stopped
+
+# Bind-mounting ./models above is the shared model directory. A named volume
+# is unnecessary unless you prefer Docker to own the files:
+# volumes:
+#   kobold-models:

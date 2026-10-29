@@ -1,0 +1,2 @@
+Place GGUF weights and KoboldCPP .kcpps/.kcppt files here.
+The kobold service mounts this directory at /models.

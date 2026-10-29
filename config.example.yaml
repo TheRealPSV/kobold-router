@@ -1,0 +1,69 @@
+# kobold-router configuration.
+# Mount this file at /config/config.yaml, or copy it to config.yaml.
+#
+# Non-empty environment variables override the file:
+#   KOBOLD_BACKEND, KOBOLD_ADMIN_PASSWORD, KOBOLD_LISTEN_HOST,
+#   KOBOLD_LISTEN_PORT, KOBOLD_LOG_LEVEL
+
+backend: http://kobold:5001
+
+# Sent only on /api/admin/reload_config. Client Authorization headers are
+# forwarded unchanged on normal requests. null means KoboldCPP has no
+# --adminpassword. Docker Compose sets KOBOLD_ADMIN_PASSWORD and that wins.
+admin_password: null
+
+listen_host: 0.0.0.0
+listen_port: 8080
+
+# How long to wait for KoboldCPP to accept traffic again after a reload.
+reload_timeout: 300
+poll_interval: 1.0
+
+# reload_config returns before the API process is back. Treat a still-up
+# server as "not restarted yet" until a probe fails or this window elapses.
+wait_for_restart: true
+restart_detect_seconds: 15
+post_ready_delay: 0.5
+
+# 0 disables the read timeout so long generations and SSE streams are not cut.
+request_timeout: 0
+
+# Set this only when KoboldCPP was already launched with that exact file.
+# Otherwise the first pinned request reloads, which is the safe default.
+initial_model: null
+
+# When true, an unknown name ending in .kcpps / .kcppt / .gguf is passed
+# straight to reload_config. initial_model and unload_model are always allowed.
+allow_raw_filenames: false
+
+models:
+  rp:
+    filename: gemma-rp.kcpps
+    # base_config: base.kcpps   # optional overrideconfig for a bare GGUF
+    # expect: gemma             # substring GET /api/v1/model must contain
+    force_on:
+      - /api/v1/generate
+      - /api/extra/generate/stream
+  assistant:
+    filename: gemma-assistant.kcpps
+
+default_model: rp
+
+# OpenAI `model` values and X-Force-Model may use these aliases.
+mappings:
+  my-rp-model: rp
+  my-assistant: assistant
+
+# Paths that load default_model when the client sends no model name and no
+# force_on rule matched. Paths ending in * are prefixes. Uncomment to replace
+# the built-in list:
+# generate_paths:
+#   - /api/v1/generate
+#   - /api/latest/generate
+#   - /api/extra/generate/stream
+#   - /request
+# openai_model_paths:
+#   - /v1/chat/completions
+#   - /v1/completions
+#   - /v1/embeddings
+#   - /v1/responses
