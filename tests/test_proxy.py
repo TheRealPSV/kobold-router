@@ -74,9 +74,11 @@ class FakeKobold:
         self.release_generate = asyncio.Event()
         self.generate_entered = asyncio.Event()
         self.current = ""
+        self.paths: list[str] = []
 
     async def __call__(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
+        self.paths.append(path)
         if path == "/api/admin/reload_config":
             payload = json.loads(request.content)
             self.reloads.append(payload)
@@ -412,6 +414,34 @@ async def _concurrent_requests_do_not_thrash() -> None:
     assert [item["filename"] for item in same.reloads] == ["gemma-rp.kcpps"]
     assert _max_overlap(same.events, "gen") == 2
     assert len(same.generate_bodies) == 2
+
+
+def test_model_in_base_url() -> None:
+    asyncio.run(_model_in_base_url())
+
+
+async def _model_in_base_url() -> None:
+    backend = FakeKobold()
+    app = create_app(config(), transport=httpx.MockTransport(backend))
+    async with lifespan_client(app) as client:
+        version = await client.get("/assistant/api/extra/version")
+        assert version.status_code == 200
+        assert backend.reloads == []
+        response = await client.post(
+            "/assistant/api/v1/generate",
+            content=GENERATE,
+            headers={"Content-Type": "application/json"},
+        )
+        assert response.status_code == 200
+        assert response.content == GENERATE
+        assert response.headers["x-kobold-router-model"] == "assistant"
+        missing = await client.post("/no-such/api/v1/generate", content=GENERATE)
+        assert missing.status_code == 400
+        assert missing.json()["error"]["code"] == "model_not_found"
+    assert backend.reloads == [{"filename": "gemma-assistant.kcpps"}]
+    assert "/api/v1/generate" in backend.paths
+    assert "/assistant/api/v1/generate" not in backend.paths
+    assert backend.generate_bodies == [GENERATE]
 
 
 def _gens_do_not_overlap_reloads(events: list[tuple[str, str]]) -> bool:

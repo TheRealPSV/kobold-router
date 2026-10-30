@@ -5,7 +5,7 @@ import pytest
 from app.config import AppConfig
 from app.errors import RouterError
 from app.paths import path_matches
-from app.routing import Incoming, ModelRouter
+from app.routing import Incoming, ModelRouter, split_model_prefix
 
 CONFIG = AppConfig.model_validate(
     {
@@ -29,6 +29,7 @@ def decide(**kwargs: str | None):
         header_model=kwargs.pop("header_model", None),
         query_model=kwargs.pop("query_model", None),
         body_model=kwargs.pop("body_model", None),
+        url_model=kwargs.pop("url_model", None),
     )
     assert not kwargs
     return ModelRouter(CONFIG).decide(incoming)
@@ -83,6 +84,41 @@ def test_unknown_openai_model() -> None:
         decide(path="/v1/completions", body_model="nope")
     assert caught.value.status == 400
     assert caught.value.code == "model_not_found"
+
+
+def test_url_prefix_beats_force_on() -> None:
+    model, rest = split_model_prefix(CONFIG, "/assistant/api/v1/generate")
+    assert model == "assistant"
+    assert rest == "/api/v1/generate"
+    decision = decide(path=rest, url_model=model)
+    assert decision is not None
+    assert decision.reason == "url"
+    assert decision.model_key == "assistant"
+    assert decision.rewrite_body is False
+
+
+def test_url_alias_and_plain_api_path() -> None:
+    model, rest = split_model_prefix(CONFIG, "/my-assistant/api/extra/generate/stream")
+    assert (model, rest) == ("my-assistant", "/api/extra/generate/stream")
+    assert split_model_prefix(CONFIG, "/api/v1/generate") == (None, "/api/v1/generate")
+    assert split_model_prefix(CONFIG, "/v1/chat/completions") == (None, "/v1/chat/completions")
+
+
+def test_url_probe_does_not_pin() -> None:
+    assert decide(method="GET", path="/api/extra/version", url_model="assistant") is None
+
+
+def test_url_typo_in_front_of_api_is_rejected() -> None:
+    with pytest.raises(RouterError) as caught:
+        split_model_prefix(CONFIG, "/gemmma/api/v1/generate")
+    assert caught.value.code == "model_not_found"
+
+
+def test_header_beats_url() -> None:
+    decision = decide(path="/api/v1/generate", url_model="assistant", header_model="rp")
+    assert decision is not None
+    assert decision.reason == "header"
+    assert decision.model_key == "rp"
 
 
 def test_version_is_not_pinned() -> None:

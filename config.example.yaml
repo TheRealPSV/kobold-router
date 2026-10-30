@@ -36,6 +36,8 @@ initial_model: null
 # straight to reload_config. initial_model and unload_model are always allowed.
 allow_raw_filenames: false
 
+# The model key is also a URL prefix. SillyTavern's server URL
+# http://host:8080/assistant forces this model on generate calls.
 models:
   rp:
     filename: gemma-rp.kcpps

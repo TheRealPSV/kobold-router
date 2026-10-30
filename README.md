@@ -9,11 +9,12 @@ KoboldCPP's admin call (`POST /api/admin/reload_config`) returns as soon as the 
 The first match wins:
 
 1. `X-Force-Model` header. An empty value means `default_model`.
-2. `force_model` query parameter. Same empty-value behavior. It is stripped before the backend sees the URL.
-3. The path is listed in a model's `force_on` (SillyTavern's generate routes in the sample config).
-4. JSON `model` on an OpenAI or Kobold generate path. Aliases in `mappings` are accepted. An unknown name is a 400.
-5. A Kobold generate path with no model name loads `default_model`.
-6. Anything else is proxied as-is (`/api/extra/version`, the KoboldAI Lite UI, token counting, abort, and so on).
+2. A model name as the first path segment: `http://host:8080/assistant/api/v1/generate` loads `assistant` and forwards `/api/v1/generate`. This is the SillyTavern base URL. It overrides `force_on`. Version and model probes under that prefix are forwarded and do not reload.
+3. `force_model` query parameter. Same empty-value behavior as the header. It is stripped before the backend sees the URL.
+4. The path is listed in a model's `force_on` (the sample config pins the plain Kobold generate routes to `rp`).
+5. JSON `model` on an OpenAI or Kobold generate path. Aliases in `mappings` are accepted. An unknown name is a 400.
+6. A Kobold generate path with no model name loads `default_model`.
+7. Anything else is proxied as-is (`/api/extra/version`, the KoboldAI Lite UI, token counting, abort, and so on).
 
 `initial_model` and `unload_model` are always valid force names. They are KoboldCPP's built-in reload targets.
 
@@ -69,15 +70,21 @@ Streaming (`/api/extra/generate/stream` and OpenAI `"stream": true`) is passed t
 
 ## SillyTavern
 
-SillyTavern talks to the native Kobold API and does not send a model name. The sample config pins those paths to the `rp` model.
+SillyTavern talks to the native Kobold API and does not send a model name. Put the model key (or an alias) in the server URL. SillyTavern appends `/api/v1/generate` itself, and that single request loads the config if it is not already loaded. There is no separate switch call.
 
-1. Start the stack and wait until `curl http://localhost:8080/status` shows KoboldCPP reachable (the first chat will also trigger the load).
-2. In SillyTavern, open **API Connections**.
-3. Choose **Text Completion** and the **KoboldCpp** API.
-4. Set the server URL to `http://<host>:8080` (no `/v1` suffix).
-5. Click **Connect**. Sampler settings, banned tokens, and dry / XTC fields stay in SillyTavern; the router does not rewrite them.
+1. In SillyTavern, open **API Connections**.
+2. Choose **Text Completion** and the **KoboldCpp** API.
+3. Set the server URL to `http://<host>:8080/rp` or `http://<host>:8080/assistant`. Use whatever name you gave the model in the config. No `/v1` suffix.
+4. Click **Connect**. Connection checks stay fast because they do not reload. The model loads on the first generation.
+5. Add a second connection with the other URL when you want the other config. Pick that connection and send a message. The proxy switches inside that generate request, after any in-flight generation finishes.
 
-To point a single script or a second frontend at the assistant model without changing SillyTavern, send `X-Force-Model: assistant` (or `my-assistant`).
+A URL with no model prefix, `http://<host>:8080`, still uses `force_on` and `default_model` (the `rp` model in the sample). Sampler settings, banned tokens, and dry / XTC fields stay in SillyTavern; the router does not rewrite them.
+
+```bash
+curl http://localhost:8080/assistant/api/v1/generate \
+  -H "Content-Type: application/json" \
+  -d "{\"prompt\":\"Hello\",\"max_length\":64}"
+```
 
 ## Open WebUI
 
@@ -128,7 +135,7 @@ Or point Compose at the host. Comment out the `kobold` service and `depends_on`,
 | `poll_interval` | Delay between readiness probes. |
 | `wait_for_restart` | Require the backend to drop once after the admin call, so a probe does not succeed against the old process. |
 | `models.<name>.filename` | File name inside `--admindir`, including the extension. Subfolders use the same relative name KoboldCPP lists. |
-| `models.<name>.force_on` | Paths that always load this model unless a header or query pin overrides them. |
+| `models.<name>.force_on` | Paths that load this model when the URL has no model prefix and no header or query pin. |
 | `models.<name>.base_config` | Optional `overrideconfig` sent with the reload (a base `.kcpps` under a GGUF). |
 | `models.<name>.expect` | After reload, `/api/v1/model` must contain this text. |
 | `default_model` | Used for generate calls that name no model, and for an empty force header. |

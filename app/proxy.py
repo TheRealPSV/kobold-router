@@ -17,7 +17,7 @@ from fastapi.responses import Response, StreamingResponse
 
 from app.config import AppConfig
 from app.errors import RouterError
-from app.routing import Decision, Incoming, ModelRouter
+from app.routing import Decision, Incoming, ModelRouter, split_model_prefix
 from app.switcher import ModelCoordinator, ReserveInfo, Target
 
 logger = logging.getLogger("kobold_router.proxy")
@@ -151,12 +151,16 @@ async def forward(request: Request) -> Response:
 
     raw = await request.body()
     parsed, body_model = inspect_body(raw, request.headers.get("content-type", ""))
+    # `/assistant/api/v1/generate` is the same generate call with the model
+    # chosen by the base URL SillyTavern was given.
+    url_model, backend_path = split_model_prefix(config, request.url.path)
     incoming = Incoming(
         method=request.method,
-        path=request.url.path,
+        path=backend_path,
         header_model=_optional_header(request, "x-force-model"),
         query_model=_optional_query(request, "force_model"),
         body_model=body_model,
+        url_model=url_model,
     )
     decision = router.decide(incoming)
     body, rewritten = apply_model_override(raw, parsed, decision)
@@ -170,7 +174,7 @@ async def forward(request: Request) -> Response:
     info = await reservation.__aenter__()
     try:
         upstream = await client.send(
-            _upstream_request(request, config, body, rewritten),
+            _upstream_request(request, config, backend_path, body, rewritten),
             stream=True,
         )
     except httpx.ConnectError as exc:
@@ -239,11 +243,12 @@ def _target(decision: Decision | None) -> Target | None:
 def _upstream_request(
     request: Request,
     config: AppConfig,
+    backend_path: str,
     body: bytes,
     rewritten: bool,
 ) -> httpx.Request:
     query = _forwarded_query(request.url.query)
-    url = config.backend + request.url.path
+    url = config.backend + backend_path
     if query:
         url = f"{url}?{query}"
     headers = {}

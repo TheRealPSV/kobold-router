@@ -15,6 +15,9 @@ from app.paths import path_matches
 # KoboldCPP accepts these names in reload_config without a file in admindir.
 SPECIAL_FILENAMES = frozenset({"initial_model", "unload_model"})
 _RAW_SUFFIXES = (".kcpps", ".kcppt", ".gguf")
+# First path segments that are APIs, not model names. `/api/v1/generate` must
+# keep working when the client does not put a model in the base URL.
+RESERVED_PREFIXES = frozenset({"api", "v1", "health", "status", "docs", "sdapi", "lcpp"})
 
 
 @dataclass(frozen=True)
@@ -27,6 +30,8 @@ class Incoming:
     header_model: str | None
     query_model: str | None
     body_model: str | None
+    # Set when the base URL was `http://host/{model}`. None if there is no prefix.
+    url_model: str | None = None
 
 
 @dataclass(frozen=True)
@@ -113,6 +118,51 @@ class ForceHeaderRule:
         return _decision(config, incoming, resolve_reference(config, incoming.header_model), self.name)
 
 
+def split_model_prefix(config: AppConfig, path: str) -> tuple[str | None, str]:
+    """Split `/gemma/api/v1/generate` into (`gemma`, `/api/v1/generate`).
+
+    The first segment is a model only when it matches a configured name.
+    `/api/...` and `/v1/...` are left unchanged. A typo in front of an API
+    path (`/gemmma/api/v1/generate`) is an error instead of a backend 404.
+    """
+    if not path.startswith("/"):
+        path = "/" + path
+    parts = path.split("/")
+    if len(parts) < 2:
+        return None, path
+    _empty, segment, *rest = parts
+    if not segment or not rest or segment.lower() in RESERVED_PREFIXES:
+        return None, path
+    try:
+        resolve_reference(config, segment)
+    except RouterError:
+        remainder = "/" + "/".join(rest)
+        if remainder.startswith("/api") or remainder.startswith("/v1"):
+            raise
+        return None, path
+    remainder = "/" + "/".join(rest)
+    return segment, remainder or "/"
+
+
+class ForceUrlRule:
+    """A base URL of `http://host/{model}` pins that model for generation.
+
+    SillyTavern appends `/api/v1/generate` to whatever URL is in the connection
+    settings. The prefix overrides `force_on`, so each connection can name its
+    own config. Probe calls such as `/api/extra/version` are not reloads.
+    """
+
+    name = "url"
+
+    def evaluate(self, incoming: Incoming, config: AppConfig) -> Decision | None:
+        if not incoming.url_model:
+            return None
+        watched = [*config.generate_paths, *config.openai_model_paths]
+        if not any(path_matches(pattern, incoming.path) for pattern in watched):
+            return None
+        return _decision(config, incoming, resolve_reference(config, incoming.url_model), self.name)
+
+
 class ForceQueryRule:
     """`?force_model=` is the query-string form of X-Force-Model."""
 
@@ -179,6 +229,7 @@ class ModelRouter:
         self.config = config
         self.rules: list = [
             ForceHeaderRule(),
+            ForceUrlRule(),
             ForceQueryRule(),
             ForcePathRule(),
             BodyModelRule(),
