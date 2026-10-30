@@ -416,6 +416,33 @@ async def _concurrent_requests_do_not_thrash() -> None:
     assert len(same.generate_bodies) == 2
 
 
+def test_root_is_router_page() -> None:
+    asyncio.run(_root_is_router_page())
+
+
+async def _root_is_router_page() -> None:
+    backend = FakeKobold()
+    app = create_app(config(), transport=httpx.MockTransport(backend))
+    async with lifespan_client(app) as client:
+        page = await client.get("/", headers={"Accept": "text/html"})
+        assert page.status_code == 200
+        assert page.headers["content-type"].startswith("text/html")
+        assert "kobold-router" in page.text
+        assert 'href="http://router/assistant"' in page.text
+        assert "gemma-assistant.kcpps" in page.text
+        assert "KoboldAI Lite" in page.text
+        data = await client.get("/")
+        assert data.headers["content-type"].startswith("application/json")
+        assert data.json()["proxy"] == "kobold-router"
+        assert data.json()["models"]["rp"]["filename"] == "gemma-rp.kcpps"
+        icon = await client.get("/favicon.ico")
+        assert icon.status_code == 204
+        # A non-browser method on / is still an API forward.
+        posted = await client.post("/", content=b"{}")
+        assert posted.status_code == 200
+    assert backend.paths == ["/"]
+
+
 def test_model_in_base_url() -> None:
     asyncio.run(_model_in_base_url())
 

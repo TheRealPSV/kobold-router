@@ -9,16 +9,17 @@ from __future__ import annotations
 
 import json
 import logging
+from html import escape
 from urllib.parse import parse_qsl, urlencode
 
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 
 from app.config import AppConfig
 from app.errors import RouterError
 from app.routing import Decision, Incoming, ModelRouter, split_model_prefix
-from app.switcher import ModelCoordinator, ReserveInfo, Target
+from app.switcher import ModelCoordinator, ReserveInfo, StatusSnapshot, Target
 
 logger = logging.getLogger("kobold_router.proxy")
 
@@ -65,10 +66,19 @@ def install_routes(app: FastAPI) -> None:
     app.add_api_route("/health", health, methods=["GET"])
     app.add_api_route("/status", status, methods=["GET"])
     app.add_api_route("/v1/models", list_models, methods=["GET"])
+    # The browser address for this process. KoboldAI Lite stays on the
+    # KoboldCPP port; proxying GET / made the router look like that UI.
+    app.add_api_route("/", home, methods=["GET", "HEAD"], include_in_schema=False)
+    app.add_api_route("/favicon.ico", favicon, methods=["GET", "HEAD"], include_in_schema=False)
     # Separate wrappers so the catch-all path parameter is not also a query
     # parameter on the root route (FastAPI would treat an undeclared path
     # name as a query field and could confuse clients).
-    app.add_api_route("/", proxy_root, methods=PROXY_METHODS, include_in_schema=False)
+    app.add_api_route(
+        "/",
+        proxy_root,
+        methods=["POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        include_in_schema=False,
+    )
     app.add_api_route("/{full_path:path}", proxy_path, methods=PROXY_METHODS, include_in_schema=False)
 
 
@@ -80,7 +90,10 @@ async def health() -> dict:
 async def status(request: Request) -> dict:
     config: AppConfig = request.app.state.config
     coordinator: ModelCoordinator = request.app.state.coordinator
-    snap = await coordinator.snapshot()
+    return status_payload(config, await coordinator.snapshot())
+
+
+def status_payload(config: AppConfig, snap: StatusSnapshot) -> dict:
     return {
         "proxy": "kobold-router",
         "backend": config.backend,
@@ -100,6 +113,115 @@ async def status(request: Request) -> dict:
         },
         "mappings": dict(config.mappings),
     }
+
+
+async def home(request: Request) -> Response:
+    """Router page for the listen URL.
+
+    Browsers send ``text/html``. Other clients get the same JSON as ``/status``.
+    """
+    config: AppConfig = request.app.state.config
+    coordinator: ModelCoordinator = request.app.state.coordinator
+    payload = status_payload(config, await coordinator.snapshot())
+    if _wants_html(request):
+        return HTMLResponse(_home_html(request, payload))
+    return JSONResponse(payload)
+
+
+async def favicon() -> Response:
+    """Keep the browser tab from requesting KoboldCPP's icon through the proxy."""
+    return Response(status_code=204)
+
+
+def _wants_html(request: Request) -> bool:
+    for part in request.headers.get("accept", "").split(","):
+        media = part.split(";", 1)[0].strip().lower()
+        if media == "text/html":
+            return True
+        if media == "application/json":
+            return False
+    return False
+
+
+def _home_html(request: Request, payload: dict) -> str:
+    origin = str(request.base_url).rstrip("/")
+    aliases_for: dict[str, list[str]] = {}
+    for alias, key in payload["mappings"].items():
+        aliases_for.setdefault(key, []).append(alias)
+
+    blocks: list[str] = []
+    for key, spec in payload["models"].items():
+        public = [key, *aliases_for.get(key, [])]
+        openai_ids = list(public)
+        if spec["filename"] not in openai_ids:
+            openai_ids.append(spec["filename"])
+        pinned = ", ".join(spec["force_on"]) if spec["force_on"] else "—"
+        marker = " (default)" if key == payload["default_model"] else ""
+        links = "".join(
+            f'<li><a href="{_esc(origin)}/{_esc(name)}">{_esc(origin)}/{_esc(name)}</a></li>'
+            for name in public
+        )
+        ids = ", ".join(f"<code>{_esc(name)}</code>" for name in openai_ids)
+        blocks.append(
+            "<section>"
+            f"<h3><code>{_esc(key)}</code>{_esc(marker)}</h3>"
+            "<dl>"
+            f"<dt>File</dt><dd><code>{_esc(spec['filename'])}</code></dd>"
+            f"<dt>Pinned paths</dt><dd>{_esc(pinned)}</dd>"
+            f"<dt>SillyTavern URL</dt><dd><ul>{links}</ul></dd>"
+            f"<dt>OpenAI model id</dt><dd>{ids}</dd>"
+            "</dl>"
+            "</section>"
+        )
+
+    loaded = payload["loaded_model"] or "none yet"
+    reported = payload["backend_model"] or "—"
+    error = payload["last_error"]
+    error_row = (
+        f"<tr><th>Last error</th><td>{_esc(error)}</td></tr>" if error else ""
+    )
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kobold-router</title>
+<style>
+  body {{ font-family: system-ui, sans-serif; max-width: 52rem; margin: 2rem auto; padding: 0 1rem; line-height: 1.45; background: #fafafa; color: #1a1a1a; }}
+  code {{ font-family: ui-monospace, monospace; font-size: 0.92em; word-break: break-all; }}
+  table, dl {{ border-collapse: collapse; width: 100%; }}
+  th, td, dt, dd {{ text-align: left; vertical-align: top; }}
+  th, td {{ padding: 0.35rem 0.8rem 0.35rem 0; }}
+  dt {{ font-weight: 600; margin-top: 0.45rem; }}
+  dd {{ margin: 0.1rem 0 0; }}
+  section {{ margin-top: 1.25rem; }}
+  ul {{ margin: 0.15rem 0 0; padding-left: 1.1rem; }}
+  h1 {{ font-size: 1.4rem; }}
+  a {{ color: inherit; }}
+</style>
+</head>
+<body>
+<h1>kobold-router</h1>
+<p>This address switches models and forwards the Kobold and OpenAI APIs. KoboldAI Lite is served by KoboldCPP at <code>{_esc(payload["backend"])}</code>.</p>
+<h2>Loaded</h2>
+<table>
+<tr><th>Config</th><td><code>{_esc(loaded)}</code></td></tr>
+<tr><th>File</th><td><code>{_esc(payload["loaded_filename"] or "—")}</code></td></tr>
+<tr><th>KoboldCPP reports</th><td><code>{_esc(reported)}</code></td></tr>
+<tr><th>Switching</th><td>{"yes" if payload["switching"] else "no"}</td></tr>
+<tr><th>In flight</th><td>{_esc(payload["inflight"])}</td></tr>
+{error_row}
+</table>
+<h2>Models</h2>
+{"".join(blocks)}
+<p><a href="{_esc(origin)}/status">/status</a> · <a href="{_esc(origin)}/health">/health</a> · <a href="{_esc(origin)}/v1/models">/v1/models</a></p>
+</body>
+</html>
+"""
+
+
+def _esc(value: object) -> str:
+    return escape(str(value), quote=True)
 
 
 async def list_models(request: Request) -> dict:

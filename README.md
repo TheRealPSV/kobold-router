@@ -14,7 +14,7 @@ The first match wins:
 4. The path is listed in a model's `force_on` (the sample config pins the plain Kobold generate routes to `rp`).
 5. JSON `model` on an OpenAI or Kobold generate path. Aliases in `mappings` are accepted. An unknown name is a 400.
 6. A Kobold generate path with no model name loads `default_model`.
-7. Anything else is proxied as-is (`/api/extra/version`, the KoboldAI Lite UI, token counting, abort, and so on).
+7. Anything else is proxied as-is (`/api/extra/version`, token counting, abort, and so on). `GET /` is the router's own page. KoboldAI Lite stays on the KoboldCPP port.
 
 `initial_model` and `unload_model` are always valid force names. They are KoboldCPP's built-in reload targets.
 
@@ -28,7 +28,7 @@ Put your weights and launcher configs in `models/`. KoboldCPP in this compose fi
 docker compose up --build
 ```
 
-The router listens on port 8080. KoboldCPP stays on port 5001 if you want to reach it directly. The default admin password is `ChangeMe` (`KOBOLD_ADMIN_PASSWORD`). Change it before anyone else can reach the port. The router sends that password only on the admin reload call. A client's `Authorization` header is forwarded as-is.
+The router listens on port 8080. Open that URL in a browser for the router page (loaded config, SillyTavern URLs, OpenAI model ids). KoboldCPP stays on port 5001, which is where KoboldAI Lite is served. The default admin password is `ChangeMe` (`KOBOLD_ADMIN_PASSWORD`). Change it before anyone else can reach the port. The router sends that password only on the admin reload call. A client's `Authorization` header is forwarded as-is.
 
 Check it:
 
@@ -236,6 +236,6 @@ The tests use an in-process fake KoboldCPP. They check that sampler fields are n
 
 - One backend, one loaded config. This is a switcher, not a load balancer.
 - WebSockets are not proxied.
-- `/health` and `/status` are the router's. `/v1/models` is the configured catalog, not KoboldCPP's raw list.
+- `GET /`, `/health`, and `/status` are the router's. `/v1/models` is the configured catalog, not KoboldCPP's raw list. KoboldAI Lite is on the KoboldCPP port.
 - A reload restarts KoboldCPP, so its own UI sessions drop. The router waits that out before sending your prompt.
 - With `--routermode`, an OpenAI request may be switched again inside KoboldCPP. The forwarded `model` is the filename, so both sides agree. Remove `--routermode` if you only want this process to switch.
