@@ -123,9 +123,12 @@ koboldcpp --model /models/model.gguf --draftmodel /models/draft.gguf --contextsi
   "contextsize": 32768,
   "gpulayers": 99,
   "draftgpulayers": 99,
+  "usecuda": ["normal"],
   "multiuser": 10
 }
 ```
+
+`usecuda` and `usevulkan` are lists of strings, not booleans. `["normal"]` is CUDA on every GPU, the same choice as `--usecuda` with no GPU id. `["normal", "0"]` pins GPU 0. A `true` value crashes current KoboldCPP while it scans that list for old options such as `lowvram`.
 
 `model_param`, `draftmodel`, and `mmproj` can be local paths or `https://` URLs that end in `.gguf`. URLs are downloaded into `--downloaddir`.
 
