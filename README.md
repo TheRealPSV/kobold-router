@@ -22,7 +22,7 @@ Kobold generate bodies are not parsed back into JSON for forwarding. `banned_tok
 
 ## Quick start
 
-Put your GGUF weights and launcher configs in `models/`. KoboldCPP in this compose file boots from `models/gemma-rp.kcpps`. Rename that flag in `docker-compose.yml` (`KCPP_ARGS`) if your file is different. A `.kcpps` file is the JSON config saved by the KoboldCPP launcher.
+Put your weights and launcher configs in `models/`. KoboldCPP in this compose file boots from `models/gemma-rp.kcpps`. Rename that flag in `docker-compose.yml` (`KCPP_ARGS`) if your file is different. What belongs in that file is described in [What a reload loads](#what-a-reload-loads).
 
 ```bash
 docker compose up --build
@@ -97,6 +97,62 @@ Open WebUI uses the OpenAI API. The router answers `GET /v1/models` from the con
 
 A chat whose `model` is `my-assistant` reloads `gemma-assistant.kcpps` when that file is not already loaded, then forwards the chat request.
 
+## What a reload loads
+
+The router does not assemble a launch command. It asks KoboldCPP to load one filename from `models.<name>.filename`. That file has to be in `--admindir`. A subfolder one level down is included, and the name must match what KoboldCPP lists, including the extension.
+
+| File | What KoboldCPP loads |
+| --- | --- |
+| `.kcpps` | A launcher config: the model plus the other settings saved in that file. Use one of these when a setup is more than a single GGUF. |
+| `.gguf` | That weights file, with KoboldCPP's defaults. A draft model, projector, LoRA, context size, or GPU-layer count from the previous process is not kept. |
+| `.kcppt` | A template. Same role as a `.kcpps`, with most machine-specific values removed. |
+
+A `.kcpps` file is JSON. Each key is a command-line flag without the leading dashes, such as `contextsize`, `gpulayers`, or `draftmodel`. The main model is stored as `model_param`. Generating the file from the same KoboldCPP build you run is the reliable way to get those names:
+
+```bash
+koboldcpp --model /models/model.gguf --draftmodel /models/draft.gguf --contextsize 32768 --gpulayers 99 --exportconfig /models/chat
+```
+
+`--exportconfig` writes the file and exits. The launcher's Save Config button writes one too. A hand-written file only needs the settings that should differ from KoboldCPP's defaults:
+
+```json
+{
+  "model_param": "/models/model.gguf",
+  "draftmodel": "/models/draft.gguf",
+  "mmproj": "/models/mmproj.gguf",
+  "contextsize": 32768,
+  "gpulayers": 99,
+  "draftgpulayers": 99,
+  "multiuser": 10
+}
+```
+
+`model_param`, `draftmodel`, and `mmproj` can be local paths or `https://` URLs that end in `.gguf`. URLs are downloaded into `--downloaddir`.
+
+A reload replaces the running config with the selected file. Omitted keys are filled from KoboldCPP's defaults, not from the flags used at startup. A file that only names a GGUF therefore comes up with the default context size and without the previous draft model or projector.
+
+Some settings stay as they were at startup, whatever the new file says. Those are the host, port, API password, admin password, admin mode, `--admindir`, the base-config path, SSL, the remote tunnel, and the download directory. Leave them on the command line. Leave passwords out of files you might copy around.
+
+Give each switchable setup its own complete `.kcpps` when the setups differ by more than the weights. Point the router at that filename, and use the same name as the SillyTavern or Open WebUI model id:
+
+```yaml
+models:
+  chat:
+    filename: chat.kcpps
+  vision:
+    filename: vision.kcpps
+```
+
+The process only has to be started once. The first file is the boot config. Later switches come from the router:
+
+```bash
+koboldcpp --config /models/chat.kcpps --host 0.0.0.0 --port 5001 --admin --admindir /models --adminpassword ChangeMe --password ChangeMe --downloaddir /models
+```
+
+`--admindir` is the directory that contains the `.kcpps` files. In Docker that is the mounted models directory. It is the container's working directory only when those are the same path. `--downloaddir` belongs on this command line because a reload cannot change it.
+
+A short file is enough when the shared settings live in a base `.kcpps`. On a switch KoboldCPP applies the base first, then overlays the selected file. Keys in the selected file win. Set the base at startup with `--baseconfig /models/base.kcpps`, or set `base_config` on a router model and the router sends it as `overrideconfig`. `--baseconfig` is used for switches, not for the first launch, so `--config` still needs to be a complete file. The base is the right place for the context size, GPU backend, and queue size. Each model file then sets `model_param` and whatever else is different, such as `draftmodel` or `mmproj`.
+
 ## Use an existing KoboldCPP
 
 You do not have to run KoboldCPP from this compose file. Start it yourself with admin mode and the directory that holds the files named in the config:
@@ -136,7 +192,7 @@ Or point Compose at the host. Comment out the `kobold` service and `depends_on`,
 | `wait_for_restart` | Require the backend to drop once after the admin call, so a probe does not succeed against the old process. |
 | `models.<name>.filename` | File name inside `--admindir`, including the extension. Subfolders use the same relative name KoboldCPP lists. |
 | `models.<name>.force_on` | Paths that load this model when the URL has no model prefix and no header or query pin. |
-| `models.<name>.base_config` | Optional `overrideconfig` sent with the reload (a base `.kcpps` under a GGUF). |
+| `models.<name>.base_config` | Optional base `.kcpps` sent as `overrideconfig`. Applied under this file on a switch. |
 | `models.<name>.expect` | After reload, `/api/v1/model` must contain this text. |
 | `default_model` | Used for generate calls that name no model, and for an empty force header. |
 | `mappings` | Extra public names, usually the ids you want in Open WebUI. |
