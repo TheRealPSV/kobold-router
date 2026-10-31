@@ -9,7 +9,7 @@ KoboldCPP's admin call (`POST /api/admin/reload_config`) returns as soon as the 
 The first match wins:
 
 1. `X-Force-Model` header. An empty value means `default_model`.
-2. A model name as the first path segment: `http://host:8080/assistant/api/v1/generate` loads `assistant` and forwards `/api/v1/generate`. This is the SillyTavern base URL. It overrides `force_on`. Version and model probes under that prefix are forwarded and do not reload.
+2. A model name as the first path segment: `http://host:8080/assistant/api/v1/generate` loads `assistant` and forwards `/api/v1/generate`. This is the SillyTavern base URL. It overrides `force_on`. Version probes under that prefix are forwarded and do not reload. `GET /v1/models` and `GET /models` are always the configured catalog. A trailing slash, a model prefix, or `/lcpp/v1/models` is the same list.
 3. `force_model` query parameter. Same empty-value behavior as the header. It is stripped before the backend sees the URL.
 4. The path is listed in a model's `force_on` (the sample config pins the plain Kobold generate routes to `rp`).
 5. JSON `model` on an OpenAI or Kobold generate path. Aliases in `mappings` are accepted. An unknown name is a 400.
@@ -88,7 +88,7 @@ curl http://localhost:8080/assistant/api/v1/generate \
 
 ## Open WebUI
 
-Open WebUI uses the OpenAI API. The router answers `GET /v1/models` from the config, so the aliases show up even while KoboldCPP is busy.
+Open WebUI uses the OpenAI API. Its model check calls `GET /v1/models`, or `GET /models` when the saved URL has no `/v1`. KoboldCPP answers both with only the GGUF that is loaded. The router answers both from the config instead, so every alias and model key shows up even while KoboldCPP is busy. The `.kcpps` filename is not a second entry. The same list is returned for a trailing slash, a model prefix (`/assistant/v1/models`), and `/lcpp/v1/models`.
 
 1. In Open WebUI, open **Admin Settings → Connections → OpenAI**.
 2. Set the URL to `http://<host>:8080/v1`.

@@ -18,6 +18,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingRes
 
 from app.config import AppConfig
 from app.errors import RouterError
+from app.paths import normalize_path
 from app.routing import Decision, Incoming, ModelRouter, split_model_prefix
 from app.switcher import ModelCoordinator, ReserveInfo, StatusSnapshot, Target
 
@@ -65,7 +66,7 @@ PROXY_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"]
 def install_routes(app: FastAPI) -> None:
     app.add_api_route("/health", health, methods=["GET"])
     app.add_api_route("/status", status, methods=["GET"])
-    app.add_api_route("/v1/models", list_models, methods=["GET"])
+    app.add_api_route("/v1/models", list_models, methods=["GET", "HEAD"])
     # The browser address for this process. KoboldAI Lite stays on the
     # KoboldCPP port; proxying GET / made the router look like that UI.
     app.add_api_route("/", home, methods=["GET", "HEAD"], include_in_schema=False)
@@ -151,17 +152,19 @@ def _home_html(request: Request, payload: dict) -> str:
 
     blocks: list[str] = []
     for key, spec in payload["models"].items():
-        public = [key, *aliases_for.get(key, [])]
-        openai_ids = list(public)
-        if spec["filename"] not in openai_ids:
-            openai_ids.append(spec["filename"])
+        public: list[str] = []
+        seen_names: set[str] = set()
+        for name in (key, *aliases_for.get(key, [])):
+            if name not in seen_names:
+                seen_names.add(name)
+                public.append(name)
         pinned = ", ".join(spec["force_on"]) if spec["force_on"] else "—"
         marker = " (default)" if key == payload["default_model"] else ""
         links = "".join(
             f'<li><a href="{_esc(origin)}/{_esc(name)}">{_esc(origin)}/{_esc(name)}</a></li>'
             for name in public
         )
-        ids = ", ".join(f"<code>{_esc(name)}</code>" for name in openai_ids)
+        ids = ", ".join(f"<code>{_esc(name)}</code>" for name in public)
         blocks.append(
             "<section>"
             f"<h3><code>{_esc(key)}</code>{_esc(marker)}</h3>"
@@ -224,18 +227,69 @@ def _esc(value: object) -> str:
     return escape(str(value), quote=True)
 
 
-async def list_models(request: Request) -> dict:
+async def list_models(request: Request) -> Response:
     """OpenAI model list built from config, so aliases show up in Open WebUI.
 
     This does not reload anything and does not need the backend to be up.
+    KoboldCPP's own `/v1/models` only names the GGUF that is loaded right now.
     """
-    config: AppConfig = request.app.state.config
+    return render_catalog(request.app.state.config, request.method, "list", None)
+
+
+def render_catalog(config: AppConfig, method: str, kind: str, model_id: str | None) -> Response:
+    if kind == "item":
+        known = catalog_ids(config)
+        if model_id not in known:
+            names = ", ".join(known)
+            raise RouterError(
+                404,
+                f"Unknown model {model_id!r}. Known names: {names}.",
+                "model_not_found",
+            )
+        payload: dict = _model_record(model_id or "")
+    else:
+        payload = {
+            "object": "list",
+            "data": [_model_record(item_id) for item_id in catalog_ids(config)],
+        }
+    if method.upper() == "HEAD":
+        return Response(status_code=200, media_type="application/json")
+    return JSONResponse(payload)
+
+
+def catalog_target(path: str) -> tuple[str, str | None] | None:
+    """Recognize a read of the OpenAI model catalog.
+
+    KoboldCPP answers ``/models`` and every path ending in ``/v1/models``
+    (including ``/lcpp/v1/models``) with only the GGUF that is loaded.
+    Open WebUI uses both shapes. Those reads stay here. ``None`` means this
+    request is some other API call. ``("item", model_id)`` is ``GET /v1/models/{id}``.
+    """
+    normalized = normalize_path(path)
+    while "//" in normalized:
+        normalized = normalized.replace("//", "/")
+    if normalized.startswith("/lcpp/"):
+        normalized = normalized[5:] or "/"
+        normalized = normalize_path(normalized)
+    if normalized == "/models" or normalized.endswith("/v1/models"):
+        return ("list", None)
+    parts = [part for part in normalized.split("/") if part]
+    if len(parts) == 3 and parts[0] == "v1" and parts[1] == "models" and parts[2]:
+        return ("item", parts[2])
+    return None
+
+
+def _model_record(model_id: str) -> dict:
+    # status.value "loaded" is what a llama.cpp-style client uses to decide
+    # the model can be selected. Every configured name is selectable; the
+    # router loads the file when a request arrives.
     return {
-        "object": "list",
-        "data": [
-            {"id": model_id, "object": "model", "created": 0, "owned_by": "kobold-router"}
-            for model_id in catalog_ids(config)
-        ],
+        "id": model_id,
+        "name": model_id,
+        "object": "model",
+        "created": 0,
+        "owned_by": "kobold-router",
+        "status": {"value": "loaded"},
     }
 
 
@@ -248,11 +302,12 @@ def catalog_ids(config: AppConfig) -> list[str]:
             seen.add(value)
             ordered.append(value)
 
+    # Filenames stay valid in a request body, but listing them beside the
+    # model key makes Open WebUI show the same config twice.
     for alias in config.mappings:
         add(alias)
-    for key, spec in config.models.items():
+    for key in config.models:
         add(key)
-        add(spec.filename)
     return ordered
 
 
@@ -267,6 +322,13 @@ async def proxy_path(request: Request, full_path: str) -> Response:
 
 async def forward(request: Request) -> Response:
     config: AppConfig = request.app.state.config
+    # Open WebUI's connection check is GET /v1/models, or GET /models when the
+    # base URL has no /v1. KoboldCPP serves the loaded GGUF on both, and on
+    # any path that ends in /v1/models.
+    found = catalog_target(request.url.path)
+    if found is not None and request.method.upper() in {"GET", "HEAD"}:
+        return render_catalog(config, request.method, found[0], found[1])
+
     router: ModelRouter = request.app.state.router
     coordinator: ModelCoordinator = request.app.state.coordinator
     client: httpx.AsyncClient = request.app.state.http

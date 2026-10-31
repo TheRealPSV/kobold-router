@@ -243,13 +243,47 @@ async def _openai_alias_rewrites_model_only() -> None:
     ids = [item["id"] for item in listed.json()["data"]]
     assert ids[0] == "my-rp-model"
     assert "my-assistant" in ids
-    assert "gemma-assistant.kcpps" in ids
+    assert "assistant" in ids
+    assert "gemma-assistant.kcpps" not in ids
     forwarded = response.json()
     assert forwarded["model"] == "gemma-assistant.kcpps"
     assert forwarded["temperature"] == 0.2
     assert forwarded["stream"] is True
     assert forwarded["messages"] == [{"role": "user", "content": "hi"}]
     assert backend.reloads == [{"filename": "gemma-assistant.kcpps"}]
+
+
+def test_model_catalog_is_not_proxied() -> None:
+    asyncio.run(_model_catalog_is_not_proxied())
+
+
+async def _model_catalog_is_not_proxied() -> None:
+    backend = FakeKobold()
+    app = create_app(config(), transport=httpx.MockTransport(backend))
+    async with lifespan_client(app) as client:
+        slash = await client.get("/v1/models/")
+        bare = await client.get("/models")
+        prefixed = await client.get("/assistant/v1/models")
+        lcpp = await client.get("/lcpp/v1/models")
+        unknown_prefix = await client.get("/not-a-model/v1/models")
+        one = await client.get("/v1/models/my-assistant")
+        missing = await client.get("/v1/models/no-such-model")
+        head = await client.request("HEAD", "/models")
+    assert slash.status_code == 200
+    ids = [item["id"] for item in slash.json()["data"]]
+    assert ids[0] == "my-rp-model"
+    assert "my-assistant" in ids
+    assert slash.json()["data"][0]["status"]["value"] == "loaded"
+    for response in (bare, prefixed, lcpp, unknown_prefix):
+        assert [item["id"] for item in response.json()["data"]] == ids
+    assert "gemma-assistant.kcpps" not in ids
+    assert one.json()["id"] == "my-assistant"
+    assert one.json()["owned_by"] == "kobold-router"
+    assert missing.status_code == 404
+    assert missing.json()["error"]["code"] == "model_not_found"
+    assert head.status_code == 200
+    assert backend.paths == []
+    assert backend.reloads == []
 
 
 def test_unknown_model_does_not_reload() -> None:
