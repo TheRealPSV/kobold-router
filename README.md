@@ -132,6 +132,19 @@ koboldcpp --model /models/model.gguf --draftmodel /models/draft.gguf --contextsi
 
 `model_param`, `draftmodel`, and `mmproj` can be local paths or `https://` URLs that end in `.gguf`. URLs are downloaded into `--downloaddir`.
 
+KoboldCPP saves a download under the last path segment of the URL. If that file already exists in `--downloaddir`, it reuses it and does not fetch the new URL. Two configs that both point at something named `mmproj-F16.gguf` or the same `...-Q4_K_M.gguf` basename therefore share one on-disk file after a switch, even when the `.kcpps` names differ. `--downloaddir` also cannot change on reload, so each setup cannot get its own download folder at switch time.
+
+Avoid that by giving each GGUF (and each draft or mmproj) a distinct local name before the configs reference it. Download once, rename if needed, and put those paths in the `.kcpps` files instead of Hugging Face URLs that share a basename:
+
+```json
+{
+  "model_param": "/models/gemma-4-31B-it-qat-UD-Q4_K_XL.gguf",
+  "mmproj": "/models/gemma-4-31B-mmproj-F16.gguf"
+}
+```
+
+A second setup uses different filenames, such as `/models/qwen-...gguf` and `/models/qwen-...-mmproj-F16.gguf`. The router only loads `gemma.kcpps` or `qwen.kcpps`; the unique local paths are what keep the weights from colliding.
+
 A reload replaces the running config with the selected file. Omitted keys are filled from KoboldCPP's defaults, not from the flags used at startup. A file that only names a GGUF therefore comes up with the default context size and without the previous draft model or projector.
 
 Some settings stay as they were at startup, whatever the new file says. Those are the host, port, API password, admin password, admin mode, `--admindir`, the base-config path, SSL, the remote tunnel, and the download directory. Leave them on the command line. Leave passwords out of files you might copy around.

@@ -1,44 +1,96 @@
-name: Publish image
+# Builds the kobold-router Docker image and publishes it to the GitHub Container Registry.
+name: Build and Publish Docker Images
 
-# Every push rebuilds the Dockerfile and moves the ghcr.io :latest tag.
-# GHCR requires a lowercase name, so TheRealPSV/kobold-router becomes
-# ghcr.io/therealpsv/kobold-router:latest.
+# Runs when a GitHub release is published.
 on:
-  push:
+  release:
+    types:
+      - released
 
-permissions:
-  contents: read
-  packages: write
-
-concurrency:
-  group: ghcr-latest
-  cancel-in-progress: true
+env:
+  REGISTRY: ghcr.io
 
 jobs:
-  publish:
+  build-and-publish:
     runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+      packages: write
+      attestations: write
+      id-token: write
+
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Image name
-        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v4
+      - name: lowercase repo name
+        id: lower_repo_name
+        uses: Entepotenz/change-string-case-action-min-dependencies@v1
         with:
-          registry: ghcr.io
+          string: ${{ github.repository }}
+
+      - name: set IMAGE_NAME
+        run: |
+          echo "IMAGE_NAME=${{ steps.lower_repo_name.outputs.lowercase }}" >> "$GITHUB_ENV"
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Log in to the GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+      - name: Check if image exists on GHCR
+        id: image_check
+        uses: tyriis/docker-image-tag-exists@v2.1.0
+        with:
+          registry: ghcr.io
+          repository: "${{ env.IMAGE_NAME}}"
+          tag: "${{ github.ref_name }}"
 
-      - name: Build and push
-        uses: docker/build-push-action@v7
+      - name: Set up tags
+        id: tags
+        if: ${{ steps.image_check.outputs.tag == 'not found' }}
+        run: |
+          {
+            echo 'tags<<EOF'
+            echo "${{ env.REGISTRY }}/${{ env.IMAGE_NAME}}:latest"
+            echo "${{ env.REGISTRY }}/${{ env.IMAGE_NAME}}:${{ github.ref_name }}"
+            echo EOF
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build and Push Docker Image
+        id: build_and_push_docker_image
+        uses: docker/build-push-action@v6
+        if: ${{ steps.image_check.outputs.tag == 'not found' }}
         with:
           context: .
           push: true
-          tags: ${{ env.IMAGE }}:latest
+          tags: ${{ steps.tags.outputs.tags }}
           labels: |
+            org.opencontainers.image.title=kobold-router
+            org.opencontainers.image.authors=TheRealPSV
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          provenance: false
+
+      - name: Edit Release
+        uses: irongut/EditRelease@v1.2.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          id: ${{ github.event.release.id }}
+          body: "https://github.com/TheRealPSV/kobold-router/pkgs/container/kobold-router"
+
+      - name: Generate Artifact Attestation
+        uses: actions/attest-build-provenance@v1
+        if: ${{ steps.image_check.outputs.tag == 'not found' }}
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME}}
+          subject-digest: ${{ steps.build_and_push_docker_image.outputs.digest }}
+
+      - name: Clean Up Untagged Images
+        uses: dataaxiom/ghcr-cleanup-action@v1.0.16
+        if: ${{ always()}}
+        with:
+          delete-untagged: true
+          delete-tags: 'sha256-*'
